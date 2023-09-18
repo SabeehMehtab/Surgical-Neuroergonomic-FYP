@@ -1,0 +1,158 @@
+% Set all paths
+
+baseDir = ['C:' filesep 'Users' filesep 'Lenovo' filesep 'Downloads' filesep 'MSc Project 2023'];
+workingDir = [baseDir filesep 'fnirs-processing'];
+srcDir = [baseDir filesep 'snirf_converted_raw' filesep];
+homerPath = [baseDir filesep 'Homer3-1.80.2'];
+preResultsDir = [workingDir filesep 'pre_results'];
+postResultsDir = [workingDir filesep 'post_results'];
+retResultsDir = [workingDir filesep 'retention_results'];
+saveSteps = {'COV'; 'OD'; 'MAcorrection'; 'BPfilter'; 'Conc'; 'Average'};
+
+% Add homer-toolbox, if it is not added to paths already
+if ~contains(path,'Homer3')
+    addpath(homerPath);
+    %call Homer's own path setting
+    cd(homerPath);
+    setpaths;
+    cd(workingDir);
+end
+  
+% Create the results directory if they do not exist
+if ~exist(preResultsDir,'dir')
+    mkdir(preResultsDir);
+    for x=1:length(saveSteps)
+        mkdir([preResultsDir filesep saveSteps{x}])
+    end
+end
+
+if ~exist(postResultsDir,'dir')
+    mkdir(postResultsDir);
+    for x=1:length(saveSteps)
+        mkdir([postResultsDir filesep saveSteps{x}])
+    end
+end
+
+if ~exist(retResultsDir,'dir')
+    mkdir(retResultsDir);
+    for x=1:length(saveSteps)
+        mkdir([retResultsDir filesep saveSteps{x}])
+    end
+end
+
+%% Select session and subject
+
+% Select session from : '01_Pre','02_Post','03_Retention'
+sess = '01_Pre';
+% Select Subject
+n=1;
+
+%% Load original raw data
+if n<10
+    fileName = [sess filesep 'Subj00' int2str(n) '_Sess001.snirf'];
+    if (strcmp(sess,'01_Pre') == 1) && n==2
+        fileName = [sess filesep 'Subj00' int2str(n) '_Sess001b.snirf'];
+    end
+else
+    fileName = [sess filesep 'Subj0' int2str(n) '_Sess001.snirf'];
+end
+
+rawData = SnirfClass([srcDir filesep fileName]);
+rawData.Info();
+
+%% Set the results folder according to session
+
+if strcmp(sess,'01_Pre') == 1
+    resultsDir = preResultsDir;
+elseif strcmp(sess,'02_Post') == 1
+    resultsDir = postResultsDir;
+elseif strcmp(sess,'03_Retention') == 1
+    resultsDir = retResultsDir;
+else
+    error('Choose a valid session')
+end
+
+%% Load data from results Conc dir
+
+fileName = strcat('Subject', int2str(n),'_Session1.snirf');
+filePath = [resultsDir filesep 'Conc' filesep fileName];
+cleanData = SnirfClass(filePath);
+cleanData.Info();
+
+%% BoxCar Function
+
+time = rawData.data.time;
+onSetValues = rawData.stim(1).states(:,1);
+offSetValues = rawData.stim(2).states(:,1);
+boxCar = zeros(size(time));
+pos = 1;
+for i = 1: length(time)
+    if time(i) >= onSetValues(pos) && time(i) < offSetValues(pos)
+        boxCar(i) = 1;
+    elseif time(i) >= offSetValues(pos) && pos < length(offSetValues)
+        pos = pos +1;
+    end
+    
+end
+
+figure;
+plot(time, boxCar)
+title('BoxCar Function')
+xlabel('Time')
+ylabel('Amplitude')
+
+%% Double Gamma Function
+timeHRF = time(1:300);
+p1 = 6;
+p2 = 10;
+Amp = 6;
+comp1 = ((timeHRF.^p1).*exp(-timeHRF)) / (factorial(p1));
+comp2 = ((timeHRF.^(p1+p2)).*exp(-timeHRF)) / (factorial(p1+p2)*Amp);
+hrf = comp1 -comp2;
+figure;
+plot(timeHRF,hrf)
+title('Double Gamma Function')
+xlabel('Time')
+ylabel('Amplitude')
+
+%% Convolution 
+
+tbasis = conv(boxCar,hrf,'same');
+figure;
+plot(time,tbasis)
+title('Convolution')
+xlabel('Time')
+ylabel('Amplitude')
+hold on
+xline(cleanData.stim(1).states(:,1), 'green')
+hold off
+%% Solve GLM for single oxy channel and plot the channel
+Y = normalize(cleanData.data.dataTimeSeries(:,1));
+
+figure;
+plot(cleanData.data.time,Y, 'red')
+hold on
+xline(cleanData.stim(1).states(:,1), 'green')
+
+title('Concentrations')
+
+% GLM
+X = normalize(tbasis);
+g = glmfit(X,Y,'normal')
+X(:,2) = 1;
+beta = Y\X
+
+%% Solve GLM for all oxy channels
+
+Y = normalize(cleanData.data.dataTimeSeries);
+X = normalize(tbasis);
+ch = 1;
+totalOxyMl = length(cleanData.data.measurementList)/3;
+betaValues = zeros(totalOxyMl,2);
+
+for x=1:totalOxyMl
+    g = glmfit(X,Y(:,ch),'normal');
+    betaValues(x,1) = g(1);
+    betaValues(x,2) = g(2);
+    ch = ch+3;
+end
